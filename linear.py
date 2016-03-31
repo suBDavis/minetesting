@@ -1,11 +1,4 @@
-"""
-Minetest client. Implements the low level protocol and a few commands.
-
-Created by reading the docs at
-http://dev.minetest.net/Network_Protocol
-and
-https://github.com/minetest/minetest/blob/master/src/clientserver.h
-"""
+#Create a linear version that completes auth.  Deal with other shit later.
 import socket
 from struct import pack, unpack, calcsize
 from binascii import hexlify
@@ -15,7 +8,79 @@ from collections import defaultdict
 import math
 import logging
 
-# Update protocol definitions as described in src/network/networkprotocol.h
+#All Non-obselete Server->Client protocols
+TOCLIENT_AUTH_ACCEPT = 0x03
+TOCLIENT_ACCEPT_SUDO_MODE = 0x04
+TOCLIENT_DENY_SUDO_MODE = 0x05
+TOCLIENT_INIT_LEGACY = 0x10
+TOCLIENT_ACCESS_DENIED = 0x0A
+TOCLIENT_ADDNODE = 0x21
+TOCLIENT_REMOVENODE = 0x22
+TOCLIENT_INVENTORY = 0x27
+TOCLIENT_TIME_OF_DAY = 0x29
+TOCLIENT_CHAT_MESSAGE = 0x30
+TOCLIENT_ACTIVE_OBJECT_REMOVE_ADD = 0x31
+TOCLIENT_ACTIVE_OBJECT_MESSAGES = 0x32
+TOCLIENT_HP = 0x33
+TOCLIENT_MOVE_PLAYER = 0x34
+TOCLIENT_ACCESS_DENIED_LEGACY = 0x35
+TOCLIENT_DEATHSCREEN = 0x37
+TOCLIENT_MEDIA = 0x38
+TOCLIENT_TOOLDEF = 0x39
+TOCLIENT_NODEDEF = 0x3a
+TOCLIENT_CRAFTITEMDEF = 0x3b
+TOCLIENT_ANNOUNCE_MEDIA = 0x3c
+TOCLIENT_ITEMDEF = 0x3d
+TOCLIENT_PLAY_SOUND = 0x3f
+TOCLIENT_STOP_SOUND = 0x40
+TOCLIENT_PRIVILEGES = 0x41
+TOCLIENT_INVENTORY_FORMSPEC = 0x42
+TOCLIENT_DETACHED_INVENTORY = 0x43
+TOCLIENT_SHOW_FORMSPEC = 0x44
+TOCLIENT_MOVEMENT = 0x45
+TOCLIENT_SPAWN_PARTICLE = 0x46
+TOCLIENT_ADD_PARTICLESPAWNER = 0x47
+TOCLIENT_DELETE_PARTICLESPAWNER_LEGACY = 0x48
+TOCLIENT_HUDADD = 0x49
+TOCLIENT_HUDRM = 0x4a
+TOCLIENT_HUDCHANGE = 0x4b
+TOCLIENT_HUD_SET_FLAGS = 0x4c
+TOCLIENT_HUD_SET_PARAM = 0x4d
+TOCLIENT_BREATH = 0x4e
+TOCLIENT_SET_SKY = 0x4f
+TOCLIENT_OVERRIDE_DAY_NIGHT_RATIO = 0x50
+TOCLIENT_LOCAL_PLAYER_ANIMATIONS = 0x51
+TOCLIENT_EYE_OFFSET = 0x52
+TOCLIENT_DELETE_PARTICLESPAWNER = 0x53
+TOCLIENT_SRP_BYTES_S_B = 0x60
+TOCLIENT_NUM_MSG_TYPES = 0x61
+
+#All client->server protocol headers
+TOSERVER_INIT = 0x02
+TOSERVER_INIT_LEGACY = 0x10
+TOSERVER_INIT2 = 0x11
+TOSERVER_PLAYERPOS = 0x23
+TOSERVER_GOTBLOCKS = 0x24
+TOSERVER_DELETEDBLOCKS = 0x25
+TOSERVER_INVENTORY_ACTION = 0x31
+TOSERVER_CHAT_MESSAGE = 0x32
+TOSERVER_DAMAGE = 0x35
+TOSERVER_PASSWORD_LEGACY = 0x36
+TOSERVER_PLAYERITEM = 0x37
+TOSERVER_RESPAWN = 0x38
+TOSERVER_INTERACT = 0x39
+TOSERVER_REMOVED_SOUNDS = 0x3a
+TOSERVER_NODEMETA_FIELDS = 0x3b
+TOSERVER_INVENTORY_FIELDS = 0x3c
+TOSERVER_REQUEST_MEDIA = 0x40
+TOSERVER_RECEIVED_MEDIA = 0x41
+TOSERVER_BREATH = 0x42
+TOSERVER_CLIENT_READY = 0x43
+TOSERVER_FIRST_SRP = 0x50
+TOSERVER_SRP_BYTES_A = 0x51
+TOSERVER_SRP_BYTES_M = 0x52
+TOSERVER_NUM_MSG_TYPES = 0x53
+
 
 # Packet types.
 CONTROL = 0x00
@@ -39,51 +104,9 @@ PROTOCOL_ID = 0x4F457403
 # No idea.
 SER_FMT_VER_HIGHEST_READ = 0x1A
 
-#Taking a wild guess - seems unimportant
-COMPRESSION_MODE = 0x00
-
 # Supported protocol versions lifted from official client.
-MIN_SUPPORTED_PROTOCOL = 0x16
-MAX_SUPPORTED_PROTOCOL = 0x18
-
-# Client -> Server command ids.
-TOSERVER_INIT = 0x02
-TOSERVER_INIT_LEGACY = 0x10
-TOSERVER_INIT2 = 0x11
-TOSERVER_PLAYERPOS = 0x23
-TOSERVER_CHAT_MESSAGE = 0x32
-TOSERVER_RESPAWN = 0x38
-TOSERVER_DAMAGE = 0x35
-
-# Server -> Client command ids.
-TOCLIENT_HELLO = 0x02
-TOCLIENT_AUTH_ACCEPT = 0x03
-TOCLIENT_ACCEPT_SUDO_MODE = 0x04
-TOCLIENT_DENY_SUDO_MODE = 0x05
-TOCLIENT_INIT_LEGACY = 0x10
-TOCLIENT_ADDNODE = 0x21
-TOCLIENT_REMOVENODE = 0x22
-TOCLIENT_INVENTORY = 0x27
-TOCLIENT_TIME_OF_DAY = 0x29
-TOCLIENT_CHAT_MESSAGE = 0x30
-TOCLIENT_HP = 0x33
-TOCLIENT_MOVE_PLAYER = 0x34
-TOCLIENT_ACCESS_DENIED = 0x0A
-TOCLIENT_ACCESS_DENIED_LEGACY = 0x35
-TOCLIENT_DEATHSCREEN = 0x37
-TOCLIENT_NODEDEF = 0x3a
-TOCLIENT_ANNOUNCE_MEDIA = 0x3c
-TOCLIENT_ITEMDEF = 0x3d
-TOCLIENT_PLAY_SOUND = 0x3F
-TOCLIENT_STOP_SOUND = 0x40
-TOCLIENT_PRIVILEGES = 0x41
-TOCLIENT_INVENTORY_FORMSPEC = 0x42
-TOCLIENT_DETACHED_INVENTORY = 0x43
-TOCLIENT_MOVEMENT = 0x45
-TOCLIENT_ADD_PARTICLESPAWNER = 0x47
-TOCLIENT_BREATH = 0x4e
-TOCLIENT_DELETE_PARTICLESPAWNER = 0x53
-
+MIN_SUPPORTED_PROTOCOL = 0x0d
+MAX_SUPPORTED_PROTOCOL = 0x16
 
 class MinetestClientProtocol(object):
     """
@@ -94,7 +117,6 @@ class MinetestClientProtocol(object):
     TODO: resend unacknowledged messages and process out-of-order packets.
     """
     def __init__(self, host, username, password=''):
-        logging.info("Start the protocol parser")
         if ':' in host:
             host, port = host.split(':')
             server = (host, int(port))
@@ -130,35 +152,24 @@ class MinetestClientProtocol(object):
         thread.daemon = True
         thread.start()
         self.handshake_lock.acquire()
-        logging.info("Done with protocol init")
 
     def _send(self, packet):
         """ Sends a raw packet, containing only the protocol header. """
         header = pack('>IHB', PROTOCOL_ID, self.peer_id, self.channel)
         self.sock.sendto(header + packet, self.server)
+        logging.warn("Sent: "+ str(header + packet))
 
     def _handshake_start(self):
         """ Sends the first part of the handshake. """
-        # packet = pack('>H B 20s H H',
-        #     TOSERVER_INIT_LEGACY,
-        #     SER_FMT_VER_HIGHEST_READ,
-        #     self.username.encode('utf-8'),
-        #     MIN_SUPPORTED_PROTOCOL,
-        #     MAX_SUPPORTED_PROTOCOL)
-        packet = pack('> H B H H H 20s',
-                TOSERVER_INIT, 
-                SER_FMT_VER_HIGHEST_READ,
-                COMPRESSION_MODE,
-                MIN_SUPPORTED_PROTOCOL, 
-                MAX_SUPPORTED_PROTOCOL,
-                self.username.encode('utf-8'))
+        packet = pack('>HB20s28sHH',
+                TOSERVER_INIT_LEGACY, SER_FMT_VER_HIGHEST_READ,
+                self.username.encode('utf-8'), self.password.encode('utf-8'),
+                MIN_SUPPORTED_PROTOCOL, MAX_SUPPORTED_PROTOCOL)
         self.send_command(packet)
-        logging.warn("Handshake started")
 
     def _handshake_end(self):
         """ Sends the second and last part of the handshake. """
         self.send_command(pack('>H', TOSERVER_INIT2))
-        logging.warn("Handshake ended.")
 
     def _start_reliable_connection(self):
         """ Starts a reliable connection by sending an empty reliable packet. """
@@ -185,7 +196,6 @@ class MinetestClientProtocol(object):
 
     def _ack(self, seqnum):
         """ Sends an ack for the given sequence number. """
-        logging.warn(str(seqnum))
         self._send(pack('>BBH', CONTROL, CONTROLTYPE_ACK, seqnum))
 
     def receive_command(self):
@@ -206,15 +216,12 @@ class MinetestClientProtocol(object):
         - or SPLIT, used to send large data.
         """
         packet_type, data = packet[0], packet[1:]
-
-        logging.warn("Data type " + str(packet_type))
-        logging.warn("data" + str(data))
-
+        logging.warn("Received packet type:" + str(packet_type))
+        logging.warn("Data: " + str(data))
         if packet_type == CONTROL:
             if len(data) == 1:
                 if data[0] == CONTROLTYPE_DISCO:
                     #A Disconnect packet was sent
-                    self.disconnect()
                     return
                 elif data[0] == CONTROLTYPE_PING:
                     # Do nothing. PING is sent through a reliable packet, so the
@@ -282,7 +289,6 @@ class MinetestClient(object):
         'password' is an optional value used when the server is private.
         'on_message' is a function called whenever a chat message arrives.
         """
-        logging.info("Starting errything")
         self.protocol = MinetestClientProtocol(server, username, password)
 
         # We need to constantly listen for server messages to update our
@@ -378,7 +384,6 @@ class MinetestClient(object):
         while True:
             packet = self.protocol.receive_command()
             (command_type,), data = unpack('>H', packet[:2]), packet[2:]
-            logging.warn("Command type is "  + str(command_type))
 
             if command_type == TOCLIENT_INIT_LEGACY:
                 # No useful info here.
@@ -432,9 +437,8 @@ class MinetestClient(object):
                 self.init_lock.release()
             elif command_type == TOCLIENT_ACCESS_DENIED_LEGACY:
                 length, bin_message = unpack('>H', data[:2]), data[2:]
-                self.access_denied = bin_message.decode('UTF-16BE')
-                logging.warn(self.access_denied)
-                self.init_lock.release()
+                self.access_denied = bin_message.decode('UTF-16BE') + " using legacy message"
+                self.init_lock.release()               
             else:
                 print('Unknown command type {}.'.format(hex(command_type)))
 
