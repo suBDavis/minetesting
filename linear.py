@@ -81,6 +81,39 @@ TOSERVER_SRP_BYTES_A = 0x51
 TOSERVER_SRP_BYTES_M = 0x52
 TOSERVER_NUM_MSG_TYPES = 0x53
 
+#Example intro message
+    # 0x0000:  4500 005b 0bbf 4000 4011 30d1 7f00 0001
+    # 0x0010:  7f00 0001 8682 7530 0047 fe5a 
+    # 4f45 7403     protocol id
+    # 0002          sender peer id
+    # 01            channel
+    # 01            packet type
+    # 0010          command type
+    # 1a            SER_FM_VER_HIGHEST_READ 26
+    # 61 7364 6600 0000 0000 0000 0000 0000 0000 0000 00                            username[]20
+    # 00 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00        password[28]
+    # 00 0d   min protocol 0
+    # 00 1a   max protocol 26
+
+#Example protocol 25 message
+    # 4500 0033 0bc0 4000 4011 30f8 7f00 0001
+    # 7f00 0001 8682 7530 001f fe32 
+    # 4f45 7403         protocol id
+    # 0002              sender peer id
+    # 01                chanel
+    # 01                packet type
+    # 0002              command type
+    # 1a                u8 serialisation version (=SER_FMT_VER_HIGHEST_READ)
+    # 00 00             u16 supported network compression modes
+    # 00 0d             u16 minimum supported network protocol version
+    # 00 1a             u16 maximum supported network protocol version
+    # 00 0461 7364 66   std::string player name (length u16) + string
+
+#Example server response auth
+    # 0x0000:  4500 0038 0bc1 4000 4011 30f2 7f00 0001
+    # 0x0010:  7f00 0001 7530 8682 0024 fe37 4f45 7403
+    # 0x0020:  0001 0003 ffdd 0100 021a 0000 001a 0000
+    # 0x0030:  0002 0004 6173 6466
 
 # Packet types.
 CONTROL = 0x00
@@ -162,9 +195,12 @@ class MinetestClientProtocol(object):
     def _handshake_start(self):
         """ Sends the first part of the handshake. """
         packet = pack('>HB20s28sHH',
-                TOSERVER_INIT_LEGACY, SER_FMT_VER_HIGHEST_READ,
-                self.username.encode('utf-8'), self.password.encode('utf-8'),
-                MIN_SUPPORTED_PROTOCOL, MAX_SUPPORTED_PROTOCOL)
+                TOSERVER_INIT_LEGACY, 
+                SER_FMT_VER_HIGHEST_READ,
+                self.username.encode('utf-8'), 
+                self.password.encode('utf-8'),
+                MIN_SUPPORTED_PROTOCOL, 
+                MAX_SUPPORTED_PROTOCOL)
         self.send_command(packet)
 
     def _handshake_end(self):
@@ -218,46 +254,6 @@ class MinetestClientProtocol(object):
         packet_type, data = packet[0], packet[1:]
         logging.warn("Received packet type:" + str(packet_type))
         logging.warn("Data: " + str(data))
-        if packet_type == CONTROL:
-            if len(data) == 1:
-                if data[0] == CONTROLTYPE_DISCO:
-                    #A Disconnect packet was sent
-                    return
-                elif data[0] == CONTROLTYPE_PING:
-                    # Do nothing. PING is sent through a reliable packet, so the
-                    # response was already sent when we unwrapped it.
-                    return
-            control_type, value = unpack('>BH', data)
-            if control_type == CONTROLTYPE_ACK:
-                self.acked = value
-            elif control_type == CONTROLTYPE_SET_PEER_ID:
-                self.peer_id = value
-                self._handshake_end()
-                self.handshake_lock.release()
-        elif packet_type == RELIABLE:
-            seqnum, = unpack('>H', data[:2])
-            self._ack(seqnum)
-            self._process_packet(data[2:])
-        elif packet_type == ORIGINAL:
-            self.receive_buffer.put(data)
-        elif packet_type == SPLIT:
-            header_size = calcsize('>HHH')
-            split_header, split_data = data[:header_size], data[header_size:]
-            seqnumber, chunk_count, chunk_num = unpack('>HHH', split_header)
-            self.split_buffers[seqnumber][chunk_num] = split_data
-            if chunk_count - 1 in self.split_buffers[seqnumber]:
-                complete = []
-                try:
-                    for i in range(chunk_count):
-                        complete.append(self.split_buffers[seqnumber][i])
-                except KeyError:
-                    # We are missing data, ignore and wait for resend.
-                    pass
-                self.receive_buffer.put(b''.join(complete))
-                del self.split_buffers[seqnumber]
-        else:
-            raise ValueError('Unknown packet type {}'.format(packet_type))
-
 
 
     def _receive_and_process(self):
@@ -273,192 +269,3 @@ class MinetestClientProtocol(object):
             assert peer_id == 0x01, 'Unexpected peer id, should be 1 got {}'.format(peer_id)
             self._process_packet(data)
 
-
-class MinetestClient(object):
-    """
-    Class for sending commands to a remote Minetest server. This creates a
-    character in the running world, controlled by the methods exposed in this
-    class.
-    """
-    def __init__(self, server='localhost:30000', username='user', password='', on_message=id):
-        """
-        Creates a new Minetest Client to send remote commands.
-
-        'server' must be in the format 'host:port' or just 'host'.
-        'username' is the name of the character on the world.
-        'password' is an optional value used when the server is private.
-        'on_message' is a function called whenever a chat message arrives.
-        """
-        self.protocol = MinetestClientProtocol(server, username, password)
-
-        # We need to constantly listen for server messages to update our
-        # position, HP, etc. To avoid blocking the caller we create a new
-        # thread to process those messages, and wait until we have a confirmed
-        # connection.
-        self.access_denied = None
-        self.init_lock = Semaphore(0)
-        thread = Thread(target=self._receive_and_process)
-        thread.daemon = True
-        thread.start()
-        # Wait until we know our position, otherwise the 'move' method will not
-        # work.
-        self.init_lock.acquire()
-
-        if self.access_denied is not None:
-            raise ValueError('Access denied. Reason: ' + self.access_denied)
-
-        self.on_message = on_message
-
-        # HP is not a critical piece of information for us, so we assume it's full
-        # until the server says otherwise.
-        self.hp = 20
-
-    def say(self, message):
-        """ Sends a global chat message. """
-        message = str(message)
-        encoded = message.encode('UTF-16BE')
-        packet = pack('>HH', TOSERVER_CHAT_MESSAGE, len(message)) + encoded
-        self.protocol.send_command(packet)
-
-    def respawn(self):
-        """ Resurrects and teleports the dead character. """
-        packet = pack('>H', TOSERVER_RESPAWN)
-        self.protocol.send_command(packet)
-
-    def damage(self, amount=20):
-        """
-        Makes the character damage itself. Amount is measured in half-hearts
-        and defaults to a complete suicide.
-        """
-        packet = pack('>HB', TOSERVER_DAMAGE, int(amount))
-        self.protocol.send_command(packet)
-
-    def move(self, delta_position=(0,0,0), delta_angle=(0,0), key=0x01):
-        """ Moves to a position relative to the player. """
-        x = self.position[0] + delta_position[0]
-        y = self.position[1] + delta_position[1]
-        z = self.position[2] + delta_position[2]
-        pitch = self.angle[0] + delta_angle[0]
-        yaw = self.angle[1] + delta_angle[1]
-        self.teleport(position=(x, y, z), angle=(pitch, yaw), key=key)
-
-    def teleport(self, position=None, speed=(0,0,0), angle=None, key=0x01):
-        """ Moves to an absolute position. """
-        position = position or self.position
-        angle = angle or self.angle
-
-        x, y, z = map(lambda k: int(k*1000), position)
-        dx, dy, dz = map(lambda k: int(k*100), speed)
-        pitch, yaw = map(lambda k: int(k*100), angle)
-        packet = pack('>H3i3i2iI', TOSERVER_PLAYERPOS, x, y, z, dx, dy, dz, pitch, yaw, key)
-        self.protocol.send_command(packet)
-        self.position = position
-        self.angle = angle
-
-    def turn(self, degrees=90):
-        """
-        Makes the character face a different direction. Amount of degrees can
-        be negative.
-        """
-        new_angle = (self.angle[0], self.angle[1] + degrees)
-        self.teleport(angle=new_angle)
-
-    def walk(self, distance=1):
-        """
-        Moves a number of blocks forward, relative to the direction the
-        character is looking.
-        """
-        dx = distance * math.cos((90 + self.angle[1]) / 180 * math.pi)
-        dz = distance * math.sin((90 + self.angle[1]) / 180 * math.pi)
-        self.move((dx, 0, dz))
-
-    def disconnect(self):
-        """ Disconnects the client, removing the character from the world. """
-        self.protocol.disconnect()
-
-    def _receive_and_process(self):
-        """
-        Receive commands from the server and process them synchronously. Most
-        commands are not implemented because we didn't have a need.
-        """
-        while True:
-            packet = self.protocol.receive_command()
-            (command_type,), data = unpack('>H', packet[:2]), packet[2:]
-
-            if command_type == TOCLIENT_INIT_LEGACY:
-                # No useful info here.
-                pass
-            elif command_type == TOCLIENT_MOVE_PLAYER:
-                x10000, y10000, z10000, pitch1000, yaw1000 = unpack('>3i2i', data)
-                self.position = (x10000/10000, y10000/10000, z10000/10000)
-                self.angle = (pitch1000/1000, yaw1000/1000)
-                self.init_lock.release()
-            elif command_type == TOCLIENT_CHAT_MESSAGE:
-                length, bin_message = unpack('>H', data[:2]), data[2:]
-                # Length is not matching for some reason.
-                #assert len(bin_message) / 2 == length 
-                message = bin_message.decode('UTF-16BE')
-                self.on_message(message)
-            elif command_type == TOCLIENT_DEATHSCREEN:
-                self.respawn()
-            elif command_type == TOCLIENT_HP:
-                self.hp, = unpack('B', data)
-            elif command_type == TOCLIENT_INVENTORY_FORMSPEC:
-                pass
-            elif command_type == TOCLIENT_INVENTORY:
-                pass
-            elif command_type == TOCLIENT_PRIVILEGES:
-                pass
-            elif command_type == TOCLIENT_MOVEMENT:
-                pass
-            elif command_type == TOCLIENT_BREATH:
-                pass
-            elif command_type == TOCLIENT_DETACHED_INVENTORY:
-                pass
-            elif command_type == TOCLIENT_TIME_OF_DAY:
-                pass
-            elif command_type == TOCLIENT_REMOVENODE:
-                pass
-            elif command_type == TOCLIENT_ADDNODE:
-                pass
-            elif command_type == TOCLIENT_PLAY_SOUND:
-                pass
-            elif command_type == TOCLIENT_STOP_SOUND:
-                pass
-            elif command_type == TOCLIENT_NODEDEF:
-                pass
-            elif command_type == TOCLIENT_ANNOUNCE_MEDIA:
-                pass
-            elif command_type == TOCLIENT_ITEMDEF:
-                pass
-            elif command_type == TOCLIENT_ACCESS_DENIED:
-                length, bin_message = unpack('>H', data[:2]), data[2:]
-                self.access_denied = bin_message.decode('UTF-16BE')
-                self.init_lock.release()
-            elif command_type == TOCLIENT_ACCESS_DENIED_LEGACY:
-                length, bin_message = unpack('>H', data[:2]), data[2:]
-                self.access_denied = bin_message.decode('UTF-16BE') + " using legacy message"
-                self.init_lock.release()               
-            else:
-                print('Unknown command type {}.'.format(hex(command_type)))
-
-
-if __name__ == '__main__':
-    import sys
-    import time
-
-    args = sys.argv[1:]
-    assert len(args) <= 3, 'Too many arguments, expected no more than 3'
-    # Load hostname, username and password from the command line arguments.
-    # Defaults to localhost:30000, 'user' and empty password (for public
-    # servers).
-    client = MinetestClient(*args)
-    try:
-        # Print chat messages received from other players.
-        client.on_message = print
-        # Send as chat message any line typed in the standard input.
-        while not sys.stdin.closed:
-            line = sys.stdin.readline().rstrip()
-            client.say(line)
-    finally:
-        client.protocol.disconnect()
