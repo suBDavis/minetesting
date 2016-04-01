@@ -163,27 +163,94 @@ class MinetestClientProtocol(object):
 
         #ack queue
         self.ack_queue = []
-        self.handshake_next_ack = False
+        # self.handshake_next_ack = False
 
         # Send TOSERVER_INIT and start a reliable connection. The order is
         # strange, but imitates the official client.
-        self._start_reliable_connection()
+        # self._start_reliable_connection()
 
         # Lock until the handshake is completed.
         self.handshake_lock = Semaphore(0)
         # Run listen-and-process asynchronously.
-        thread = Thread(target=self._receive_and_process)
-        thread.daemon = True
-        thread.start()
-        self.handshake_lock.acquire()
+        # thread = Thread(target=self._receive_and_process)
+        # thread.daemon = True
+        # thread.start()
+        # self.handshake_lock.acquire()
 
-    def _send(self, packet):
+        self._blocking_handshake()
+
+    def _send(self, packet, channel):
         """ Sends a raw packet, containing only the protocol header. """
         header = pack('>IHB', PROTOCOL_ID, self.peer_id, self.channel)
         self.sock.sendto(header + packet, self.server)
         logging.warn("Sent: "+ str(header + packet))
         self.send_counter += 1
 
+    def _blocking_handshake(self):
+
+        seqnum = SEQNUM_INITIAL
+
+        # 1 Send empty reliable message
+        self._start_reliable_connection()
+        
+        # 2 Wait for server to syn and send mypeer id
+        packet = self._blocking_receive_one()
+        if packet[0] == RELIABLE:
+            seqnum, ctrl_type, ctrl_peer, peer_id = unpack('>HBBH', packet[1])
+            self.peer_id = peer_id
+            self.seqnum = seqnum
+            assert ctrl_peer == CONTROLTYPE_SET_PEER_ID
+        logging.warn(packet)
+
+        # 3 Wait for server to ack
+        packet = self._blocking_receive_one()
+        if packet[0] == CONTROL:
+            ctrl_type, seqnum = unpack('>BH', packet[1])
+            self.seqnum = 0xFFDD
+
+        # 4 Syn large window request
+        self._enable_big_send_window()
+
+        # 5 Ack last syn
+        self._ack(seqnum)
+
+        # 6 Wait for server to ack
+        packet = self._blocking_receive_one()
+        if packet[0] == CONTROL:
+            ctrl_type, seqnum = unpack('>BH', packet[1])
+            self.seqnum = seqnum
+
+        # 7 Send legacy TOSERVER_INIT_LEGACY
+        # 8 Send regular TOSERVER_INIT
+        self._handshake_start()
+
+        # 9 Wait for server hello
+        packet = self._blocking_receive_one()
+        logging.warn(packet)
+
+        # 10 Ack hello
+
+        # 11 SYN TOSERVER_SRP_BYTES_A
+
+        # 12 Wait for server ack
+
+        # 13 Wait for server syn TOCLIENT_SRP_BYTES_S_B
+
+        # 14 Ack last
+
+        # 15 SYN TOSERVER_SRP_BYTES_M
+
+        # 16 Wait for server ack
+
+        # 17 Wait for server TOCLIENT_AUTH_ACCEPT
+
+        # 18 Ack last
+        
+        # 19 SYN TOSERVER_INIT2
+
+        # 20 Wait for server ack
+
+        # Done - begin reading messages normally
 
     def _send_channel_1(self, packet):
         """ Sends a raw packet, containing only the protocol header. """
@@ -222,8 +289,11 @@ class MinetestClientProtocol(object):
 
     def _start_reliable_connection(self):
         """ Starts a reliable connection by sending an empty reliable packet. """
-        self.send_command(b'0000') #client sends this as the command type, so I will too
-    
+        #self.send_command(b'') #client sends this as the command type, so I will too
+        packet = pack('>BHBH', RELIABLE, self.seqnum & 0xFFFF, 0x01, 0x0000)
+        self._send(packet, self.talk_channel)
+        self.seqnum += 1
+
     def _enable_big_send_window(self):
         self._send_reliable(pack('>H', 4))
 
@@ -239,7 +309,7 @@ class MinetestClientProtocol(object):
         """
         packet = pack('>BH', RELIABLE, self.seqnum & 0xFFFF) + message
         self.seqnum += 1
-        self._send(packet)
+        self._send(packet, self.talk_channel)
 
     def send_command(self, message):
         """ Sends a useful message, such as a place or say command. """
@@ -248,10 +318,7 @@ class MinetestClientProtocol(object):
 
     def _ack(self, seqnum):
         """ Sends an ack for the given sequence number. """
-        if self.peer_id == 0:
-            self.ack_queue.append(seqnum)
-            return
-        self._send(pack('>BBH', CONTROL, CONTROLTYPE_ACK, seqnum))
+        self._send(pack('>BBH', CONTROL, CONTROLTYPE_ACK, seqnum), self.ack_channel)
 
     def receive_command(self):
         """
@@ -274,36 +341,36 @@ class MinetestClientProtocol(object):
         logging.warn("Received packet type:" + str(packet_type))
         logging.warn("Data: " + str(data))
 
-        if packet_type == CONTROL:
-            #We received a control packet.  
-            #Read the next byte, it contains the control type
-            control_type = data[0]
-            if len(data) == 1:
-                if control_type == CONTROLTYPE_PING:
-                    # we already ack'd
-                    return
-                elif control_type == CONTROLTYPE_DISCO:
-                    logger.warn("disconnect")
-                    return
-            #otherwise, the server might have some other data for us
-            control_type, value = unpack('>BH', data)
-            if control_type == CONTROLTYPE_ACK:
-                #Just the server acking the counter.  Don't worry about this.
-                self.acked = value
-            elif control_type == CONTROLTYPE_SET_PEER_ID:
-                self.peer_id = value
-                #We have a peer id, so we can start handshake now
-                #but first, ack all the shit you couldn't becayse you were waiting for a peer
-                for sn in self.ack_queue:
-                    self._ack(sn)
-                self._enable_big_send_window()
-                self._handshake_start()
-        elif packet_type == RELIABLE:
-            seqnum, = unpack('>H', data[:2])
-            self._ack(seqnum)
-            self._process_packet(data[2:])
-        elif packet_type == ORIGINAL:
-            self.receive_buffer.put(data)  
+        # if packet_type == CONTROL:
+        #     #We received a control packet.  
+        #     #Read the next byte, it contains the control type
+        #     control_type = data[0]
+        #     if len(data) == 1:
+        #         if control_type == CONTROLTYPE_PING:
+        #             # we already ack'd
+        #             return
+        #         elif control_type == CONTROLTYPE_DISCO:
+        #             logger.warn("disconnect")
+        #             return
+        #     #otherwise, the server might have some other data for us
+        #     control_type, value = unpack('>BH', data)
+        #     if control_type == CONTROLTYPE_ACK:
+        #         #Just the server acking the counter.  Don't worry about this.
+        #         self.acked = value
+        #     elif control_type == CONTROLTYPE_SET_PEER_ID:
+        #         self.peer_id = value
+        #         #We have a peer id, so we can start handshake now
+        #         #but first, ack all the shit you couldn't becayse you were waiting for a peer
+        #         for sn in self.ack_queue:
+        #             self._ack(sn)
+        #         self._enable_big_send_window()
+        #         self._handshake_start()
+        # elif packet_type == RELIABLE:
+        #     seqnum, = unpack('>H', data[:2])
+        #     self._ack(seqnum)
+        #     self._process_packet(data[2:])
+        # elif packet_type == ORIGINAL:
+        #     self.receive_buffer.put(data)  
 
 
     def _receive_and_process(self):
@@ -319,6 +386,16 @@ class MinetestClientProtocol(object):
             assert peer_id == 0x01, 'Unexpected peer id, should be 1 got {}'.format(peer_id)
             self._process_packet(data)
 
+    def _blocking_receive_one(self):
+        #Takes a callback function calback, which should take one argument
+        packet, origin = self.sock.recvfrom(1024)
+        header_size = calcsize('>IHB')
+        header, data = packet[:header_size], packet[header_size:]
+        protocol, peer_id, channel = unpack('>IHB', header)
+        assert protocol == PROTOCOL_ID, 'Unexpected protocol.'
+        assert peer_id == 0x01, 'Unexpected peer id, should be 1 got {}'.format(peer_id)
+        packet_type, packet_data = data[0], data[1:]
+        return (packet_type, packet_data)
 
 class MinetestClient(object):
     """

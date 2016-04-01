@@ -215,6 +215,7 @@
     # 1cd4 f139 b1bc 3372 520e a9
 
 #Server acks the counter..  gonna stop decoding ack messages now
+
 #Server reply TOCLIENT_AUTH_ACCEPT
     # 4500 0045 0bc8 4000 4011 30de 7f00 0001
     # 7f00 0001 7530 8682 0031 fe44 
